@@ -66,6 +66,12 @@ _remainBytes-=sizeof(T);
 
 注意看上面的图：我们让所有还回来的内存像链表链表一样被连接起来，其中_freeList被称为头指针，它的前4个或者8个字节存储下一个内存单元的地址,假设有块内存obj被使用使用之后还回来，那么我们就利用头插法将obj作为头部， _freeList进行前移
 
+![image-20220427190447375](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427190447375.png)
+
+![image-20220427190742958](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427190742958.png)
+
+![image-20220427191300836](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427191300836.png)
+
 ```cpp
 *(**obj)=_freeList;//注意*(**)obj可以取出obj的前4个或8个字节，然后让他存储下一个地址，即_freeList的地址
 _freeList=obj;//让obj重新称为头
@@ -83,6 +89,16 @@ _remainBytes-=objsize;
 ```
 
 既然我们已经用一个链表管理每次还回来的内存了，那么这些还回来的内存改怎么办呢？答案是重复利用，所以当我们申请内存时，如果_freeList不为空，就说明当前已经有还回来的内存了，那么我们优先使用这块内存来进行申请，节约空间
+
+![image-20220427203952789](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427203952789.png)
+
+![image-20220427204215094](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427204215094.png)
+
+![image-20220427204610493](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427204610493.png)
+
+
+
+
 
 ```cpp
 //说明有还回来的内存，重复利用
@@ -363,10 +379,6 @@ void Test()
 
 
 
-```
-
-```
-
 #### 高并发内存池整体框架设计
 
 考虑下面几方面问题：
@@ -379,17 +391,59 @@ void Test()
 
 高并发内存池主要由以下3个部分构成：
 
+![image-20220427203554271](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427203554271.png)
+
 1.thread cache:线程缓存是每个线程独有的，用于小于256K的内存的分配，线程从这里申请内存不需要加锁，每个线程独享一个cache，这也就是这个并发线程池高效的地方
 
-2.central cache:中心缓存是所有线程所共享的，thread_cache是按需从central cache中获取的对象，central cache合适的时机回收thread cache中的对象，避免一个线程占用了太多的内存，而其它线程的内存吃紧，达到内存分配在多个线程中更均衡的按需调度的目的(central cache 是存在竞争的，所以从这里取内存对象是需要加锁的，首先这里用的是桶锁，其次只有thread cache的没有内存对象时才会找central cache，所以这里的竞争不会很激烈)
+2.central cache:中心缓存是所有线程所共享的，thread_cache是按需从central cache中获取的对象，central cache合适的时机回收thread cache中的对象，避免一个线程占用了太多的内存，而其它线程的内存吃紧，达到内存分配在多个线程中更均衡的按需调度的目的(central cache 是存在竞争的，所以从这里取内存对象是需要加锁的，首先这里用的是 桶锁，其次只有thread cache的没有内存对象时才会找central cache，所以这里的竞争不会很激烈)
 
 3.page cache:页缓存时在central cache 缓存上面的一层缓存，存储的内存是以页为单位存储及分配的，central cache没有内存对象时，从page cache分配出一定数量的page，并切割成定长大小的内存，分配给central cache，当一个span的及格跨度也的对象都回收以后，page cache会回收central cache满足条件的span对象，并且合并相邻的页，组成更大的页，缓解内存碎片的问题
 
-
+ 
 
 thread cache 设计
 
-thread cache是一个哈希桶结构，每个桶是一个按桶位置映射的大小的内存块对象的自由链表，每个线程都会有一个thread cache对象，这样每个线程在这里获取对象和释放对象时都是无锁的
+thread cache是一个哈希桶结构，每个桶是一个按桶位置映射的大小的内存块对象的自由链表，每个线程都会有一个thread cache对象，这样每个线程在这里获取对象和释放对象时都是无锁的 
+
+![image-20220427203006517](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427203006517.png)
+
+申请内存:
+
+1.当内存申请size<=256KB，先获取到线程本地存储的thread cace对象，计算size映射的哈希桶自由链表下标i
+
+2.如果自由链表_freeLists[i]中有对象，则直接Pop一个内存对象返回
+
+3.如果_freeLists[i]中没有对象时，则批量从central cache中获取一定数量的对象，插入到自由链表并返回一个对象
+
+释放内存：
+
+1.当释放内存小于256KB时将内存释放回thread cache，计算size映射到自由链表桶的位置i，将对象Push到_freeLists[i]
+
+2.当链表的长度过长，则回收一部分内存对象到central cache
+
+哈希桶内存映射规则：
+
+![image-20220427205707503](https://raw.githubusercontent.com/qingyan520/Cloud_img/master/img/image-20220427205707503.png)
+
+如上图所示，我们以8bytes为对齐数，如果申请的内存大小位于0~8之间，我们统一按照8字节在第一个桶里面申请内存，如果内存大于8小于16，就在第二个桶里面继续以8字节对齐申请内存，当然，以上都是假象情况，如果真的以8字节为对齐数申请内存，我们就得建很多的桶，增加消耗
+
+```cpp
+//例如我们一直以8字节进行对齐，我们简单计算一下一共需要建立多少个桶
+256*1024/8=32768
+//如上所示，一共需要建立32768个桶，所以我们需要换一种方式建立桶，以减少内存消耗
+```
+
+如上所示，如果以8字节对齐建立桶的话需要建立32768个桶，增大内存开销，所以我们换一种对齐方式，每一个阶段内的对齐数都是不同的
+
+```cpp
+ [1,128]               8字节对齐       freelist[0,16)   //16个桶
+ [128+1,1024]          16字节对齐      freelist[16,72)  //56个桶
+ [1024+1,8*1024]       128字节对齐     freelist[72,128) //56个桶
+ [8*1024+1,64*1024]    1024字节对齐    freelist[128,184)//56个桶
+ [64*1024+1,256*1024]  8*1014字节对齐  freelist[184,208)//24个桶
+```
+
+如上表所示，我们[1,128]字节范围内按照8字节进行对齐，而[128+1,0124]以16字节进行对齐，，越到后面对齐数越大，这样可以尽可能地少建桶
 
 ###### Common.h
 
@@ -433,7 +487,7 @@ class FreeList
         return _freeList==nullptr;
     }
     private:
-    void*_freeList;
+    void*_freeList=nullptr;
 };
 
 
@@ -547,13 +601,13 @@ class SizeClass
 class ThreadCache{
     public:
     void*Allocate(size_t size);//申请空间
-    void Deallocate(vaoid*ptr,size_t size);//释放空间
+    void Deallocate(void*ptr,size_t size);//释放空间
     void*FetchFromCentralCache(size_t index,size_t size);//从中心缓冲获取对象
     
     private:
     FreeList _freeLists[NFREE_LISTS];
 };
-
+//让每个线程都有自己的ThreadCache
 static _declspec(thread) ThreadCache* pTLSThreadCache=nullptr;
 ```
 
@@ -658,5 +712,15 @@ int main()
 {
     
 }
+```
+
+Centrol Cache整体设计
+
+Central Cache也是一个哈希桶结构，它的哈希桶映射关系和threadCache是一样的，不同的是它的每个哈希桶的位置挂的是SpanList链表结构，不过每个哈希桶下面的span中的大块内存块被按照映射关系切成了一个个小内存对象挂在span的自由链表中
+
+```
+哈希桶的每个位置下面挂的都是Span对象连接的链表，不同的是
+1.8Bytes映射位置下面挂的span中的页被切成8Byte大小的对象的自由链表
+2.256KB位置的span中的页被切成256KB大小对象的自由链表
 ```
 

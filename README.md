@@ -450,10 +450,20 @@ thread cache是一个哈希桶结构，每个桶是一个按桶位置映射的�
 ```cpp
 //管理小对象切分好的小对象的自由链表
 #include<assert.h>
+#include"Common.h"
 #include<thread>
 #include<mutex>
+#include<algorithm>
 static const size_t MAX_BYTES=256*1024;
 static const size_t NFREE_LITS=208;
+
+ifdef _WIN64
+    typedef unsigned long long PAGE_ID;
+elif _WIN32
+    typedef size_t PAGE_ID;
+#endif
+
+
 void*& NextObj(void*obj)
 {
     return *(void**)obj;
@@ -486,8 +496,13 @@ class FreeList
     {
         return _freeList==nullptr;
     }
+    size_t& MaxSize()
+    {
+        return _maxSize;
+    }
     private:
     void*_freeList=nullptr;
+    size_t _maxSize=1;
 };
 
 
@@ -588,6 +603,75 @@ class SizeClass
         }
     }
     
+  	//一次thread cache从中心缓存获取多少个
+    static size_t NumMoveSize(size_t size)
+    {
+        asse
+        if(size==0)
+            return 0;
+        //[2,512]这一次批量移动多少个对象的(慢启动)上限值
+        //小对象一次批量上限高
+        //小对象一次批量上限低
+        int num=MAX_BYTES/size;
+        if(num<2)
+            num=2;
+        if(num>512)
+            num=512;
+        return num;
+    }
+    
+};
+
+
+//管理多个连续页地大块内存
+struct Span
+{
+    PAGE_ID _pageId=0;//大块内存地起始页地页号
+    size_t _n=0;//页的数量
+    
+    Span*_next=nullptr;//双向链表的结构
+    Span*_prev=nullptr;
+    
+    size_t _useCount=0;//切好的小块内存，被分配给thread cache的计数
+    void*_freeList=nullptr;//切好的小块内存的自由链表
+};
+
+//带头双向循环链表
+calss SpanList
+{
+    private:
+    Span*_head;
+    public:
+    SpanList()
+    {
+        _head=new Span;
+        _head->_next=_head;
+        _head->_prev=_head;
+    }
+    
+    void Insert(Spqn*pos,Span*newSpan)
+    {
+        assert(newSpan);
+        assert(pos);
+        
+        Sapn*prev=pos->_prev;
+        //prev,newspan,pos;
+        prev->_next=newSpan;
+        newSpan->_prev=prev;
+        newSpan->_next=pos;
+        pos->_prev=newSpan;
+    }
+    
+    
+    void Erase(Span*pos)
+    {
+        assert(pos);
+        assert(pos!+head);
+        Span*prev=pos->_pres;
+        Span*next=pos->_next;
+        prev->_next=next;
+        next->_prev=prev;
+    }
 };
 ```
 
@@ -643,6 +727,16 @@ void ThreadCache::Deallocate(void*ptr,size_t size)
 
 void*ThreadCache::FetchFromCentralCache(size_t index,size_t size)
 {
+    //慢开始的启动算法
+    //1.最开始不会一次向ccentral cache要太多，因为要太多了可能用不完
+    //2.如果你不要这个size大小内存需要，那么batchNum就会不断增长，直到上线
+    size_t batchNum=min(_freeLists[index].MaxSize(),SIzeClass::NumMoveSize(size));
+    Centr
+    if(_freeLists[index].MaxSize()==batchNum)
+    {
+        _freeLists[index].MaxSize+=1;
+    }
+    
     return nullptr;
 }
 ```
@@ -718,9 +812,56 @@ Centrol Cache整体设计
 
 Central Cache也是一个哈希桶结构，它的哈希桶映射关系和threadCache是一样的，不同的是它的每个哈希桶的位置挂的是SpanList链表结构，不过每个哈希桶下面的span中的大块内存块被按照映射关系切成了一个个小内存对象挂在span的自由链表中
 
+Central Cache核心设计
+
+Central Cache设置为单例模式
+
+> 单例模式分为饿汉模式和懒汉模式两种
+>
+> 这里只需要用最简单的饿汉模式即可
+
+
+
 ```
 哈希桶的每个位置下面挂的都是Span对象连接的链表，不同的是
 1.8Bytes映射位置下面挂的span中的页被切成8Byte大小的对象的自由链表
 2.256KB位置的span中的页被切成256KB大小对象的自由链表
+```
+
+###### CentralCache.h
+
+```cpp
+#include"Common.h"
+//单例模式
+class CentralCache
+{
+    private:
+    SpanList _spanList[NFREELIST];
+    std::muext _mtx;//桶锁
+    static CentralCache _sInst;
+    
+    
+    CentralCache()
+    {    
+        
+    }
+    
+    CentralCache(const CentralCache&)=delete;
+    
+    public:
+    CentralCache*GetInstance()
+    {
+        return &_SINst;
+    }
+    
+    size_t FetchRangeObj(void*&start,void*&end,size_t n,size_t byte_size);
+};
+```
+
+###### CentralCache.cpp
+
+```Cpp
+#include"CentralCache.h"
+CentralCache CentralCache::_sInst=nullptr;
 ```
 

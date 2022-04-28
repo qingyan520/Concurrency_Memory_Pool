@@ -1,10 +1,21 @@
-#pragma once
-#include<iostream>
-#include <exception>
-#include<vector>
-#include<cstdlib>
-using std::cout;
-using std::endl;
+#include"Common.h"
+
+inline static void* SystemAlloc(size_t kpage)
+{
+#ifdef _WIN32
+    //windows平台下申请内存
+    void* ptr = VirtualAlloc(0, kpage * 8 * 1024, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+    //Linux下使用brk,mmap等
+#endif
+
+    if (ptr == nullptr)
+    {
+        throw std::bad_alloc();
+    }
+    return ptr;
+}
+
 
 template <class T>
 class ObjectPool {
@@ -15,13 +26,14 @@ public:
 		if (_freeList)
 		{
             void* next = *((void**)_freeList);
-			obj =(T*)next;
+			obj =(T*)_freeList;
+            _freeList = next;
 		}
 
 		return obj;
 		if (sizeof(T) > _remainBytes)
 		{
-			_memory = (char*)malloc(128 * 1024);
+			_memory = (char*)SystemAlloc(16);
 			_remainBytes = 128 * 1024;
 			if (_memory == nullptr)
 			{
@@ -41,14 +53,18 @@ public:
 	void Delete(T* obj)
 	{
 		obj->~T();
-		*(void**)obj = _freeList;
-		_freeList = obj;
+        if (obj != nullptr)
+        {
+            *(void**)obj = _freeList;
+            _freeList = obj;
+        }
 	}
 private:
-	char* _memory;//申请一大块内存，指向这块内存的起始位置
-	void* _freeList;//自由链表，连接返回的内存
-	size_t _remainBytes;//记录剩余的字节数
+	char* _memory=nullptr;//申请一大块内存，指向这块内存的起始位置
+	void* _freeList=nullptr;//自由链表，连接返回的内存
+	size_t _remainBytes=0;//记录剩余的字节数
 };
+
 
 
 struct TreeNode
@@ -66,11 +82,11 @@ struct TreeNode
 
 
 //测试性能
-void Test()
+void Test_ObjectPool()
 {
     //每一轮申请释放多少次
     const size_t Rounds = 3;
-    const size_t N = 100000;
+    const size_t N = 1000000000;
     size_t begin1 = clock();
     std::vector<TreeNode*>v1;
     v1.resize(N);
@@ -87,6 +103,8 @@ void Test()
         v1.clear();
     }
     size_t end1 = clock();
+
+
     ObjectPool<TreeNode> TNPool;
     size_t begin2 = clock();
     std::vector<TreeNode*> v2;

@@ -482,6 +482,13 @@ class FreeList
         _freeList=obj;
     }
     
+    
+    void PushRange(void*start,void*end)
+    {
+        (void**)end=_freeList;
+        _freeList=start;
+    }
+    
     //弹出一个对象
     void*Pop()
     {
@@ -603,12 +610,10 @@ class SizeClass
         }
     }
     
-  	//一次thread cache从中心缓存获取多少个
+  	//一次thread cache从中心缓存获取多少个对象
     static size_t NumMoveSize(size_t size)
     {
-        asse
-        if(size==0)
-            return 0;
+        assert(size>0);
         //[2,512]这一次批量移动多少个对象的(慢启动)上限值
         //小对象一次批量上限高
         //小对象一次批量上限低
@@ -730,14 +735,29 @@ void*ThreadCache::FetchFromCentralCache(size_t index,size_t size)
     //慢开始的启动算法
     //1.最开始不会一次向ccentral cache要太多，因为要太多了可能用不完
     //2.如果你不要这个size大小内存需要，那么batchNum就会不断增长，直到上线
-    size_t batchNum=min(_freeLists[index].MaxSize(),SIzeClass::NumMoveSize(size));
-    Centr
-    if(_freeLists[index].MaxSize()==batchNum)
+    //3.size越大，一次向central cache要的batchNum就越小
+    //4.如果size越小，一次向central cache要的batchNum就越大
+    size_t batchNum=std::min(_freeLists[index].MaxSize(),SizeClass::NumMoveSize(size));
+     if(_freeLists[index].MaxSize()==batchNum)
     {
-        _freeLists[index].MaxSize+=1;
+        _freeLists[index].MaxSize()+=1;
     }
-    
-    return nullptr;
+   
+    if()
+        void*start=nullptr;
+    void*end=nullptr;
+  size_t actualNum=CentralCache::GetInstance()->FetchRangeObj(start,end,batNum,size);
+    assert(actualNum>1);
+   if(actualNum==1)
+   {
+       assert(start==end);
+       return start;
+   }
+    else
+    {
+        _freeLists[index].PushRange(Nextobj(start),end);
+        return start;
+    }
 }
 ```
 
@@ -849,19 +869,98 @@ class CentralCache
     CentralCache(const CentralCache&)=delete;
     
     public:
-    CentralCache*GetInstance()
+    static CentralCache*GetInstance()
     {
-        return &_SINst;
+        return &_sInst;
     }
     
+    
+    //从中心缓存获取一定数量的对象给thread cache
     size_t FetchRangeObj(void*&start,void*&end,size_t n,size_t byte_size);
+    
+    //从SpanList或者page cache获取一个span
+    Span*GetOneSpan(SpanList&list,size_t byte_size);
+    
+    public:
+      std::muext _mtx;//桶锁
+    
 };
 ```
 
 ###### CentralCache.cpp
 
 ```Cpp
-#include"CentralCache.h"
+#include"CentralCache.h"·
 CentralCache CentralCache::_sInst=nullptr;
+
+ size_t CentralCache::FetchRangeObj(void*&start,void*&end,size_t n,size_t size)
+ {
+     size_t index=SizeClass::Index(size);
+     _spanLists[index]._mtx.lock();
+     
+     //从span中获取num个对象
+     //如果不够，有多少拿多少
+     Span*span=GetOneSpan(_spanLists[index],size);
+     assert(span);
+     assert(span->_freeList);
+     start=span->_freeList;
+     end=start;
+   	 size_t i=0;
+     size_t actualNUm=1;
+     while(i<batchNum-1&&*(void**)!=nullptr)
+     {
+         end=*(void**)end;
+         i++;
+         ++actualNum;
+     }
+     span->_freeList=*(void**)end;
+     *(void**)end=nullptr;
+     _spanLists[index]._mtx.unlock();
+     return actualNUm;
+ }
+
+
+   //从SpanList或者page cache获取一个span 
+Span* CentralCache::GetOneSpan(SpanList&list,size_t byte_size)
+{
+    
+}
+```
+
+PageCache整体设计以及实现
+
+###### PageCache.h
+
+```cpp
+#include"Common.h"
+class PageCache
+{
+    private:
+    
+    SpanList _spanLists[NPAGES];
+    std::mutex _pageMtx;
+    static PageCache _sInstan;
+ 
+    PageCache();
+    PageCache(const&PageCache&)=delete;
+    
+    public:
+    static PageCache*GetInstance()
+    {da
+        return *sInst;
+    }
+    
+    Span*NewSpan(size_t K)
+    {
+        
+    }
+}
+```
+
+###### PageCache.cpp
+
+```cpp
+#include "PageCache.h"
+static PageCache::_sInst;
 ```
 

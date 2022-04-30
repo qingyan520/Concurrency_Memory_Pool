@@ -456,7 +456,8 @@ thread cache是一个哈希桶结构，每个桶是一个按桶位置映射的�
 #include<algorithm>
 static const size_t MAX_BYTES=256*1024;
 static const size_t NFREE_LITS=208;
-
+static const size_t NPAGES=128;
+static const size_t PAGE_SHIFT=13;
 ifdef _WIN64
     typedef unsigned long long PAGE_ID;
 elif _WIN32
@@ -485,7 +486,7 @@ class FreeList
     
     void PushRange(void*start,void*end)
     {
-        (void**)end=_freeList;
+        *(void**)end=_freeList;
         _freeList=start;
     }
     
@@ -625,6 +626,18 @@ class SizeClass
         return num;
     }
     
+    
+    //计算一次向系统获取几个页
+    static size_t NumMovePage(size_t size)
+    {
+        size_t num=NumMoveSize(size);
+        size_t npage=num*size;
+        npage>>=PAGE_SHIFT;
+        if(npage==0)
+            npage=1;
+        return npage;
+    }
+    
 };
 
 
@@ -671,12 +684,29 @@ calss SpanList
     void Erase(Span*pos)
     {
         assert(pos);
-        assert(pos!+head);
+        assert(pos!=head);
         Span*prev=pos->_pres;
         Span*next=pos->_next;
         prev->_next=next;
         next->_prev=prev;
     }
+    
+    Span*begin()
+    {
+        return _head->next;
+    }
+    
+    Span*end()
+    {
+        return _head;
+    }
+    
+    
+    void PushFront(Span*span)
+    {
+        Insert(begin(),Span);
+    }
+    
 };
 ```
 
@@ -733,7 +763,7 @@ void ThreadCache::Deallocate(void*ptr,size_t size)
 void*ThreadCache::FetchFromCentralCache(size_t index,size_t size)
 {
     //慢开始的启动算法
-    //1.最开始不会一次向ccentral cache要太多，因为要太多了可能用不完
+    //1.最开始不会一次向central cache要太多，因为要太多了可能用不完
     //2.如果你不要这个size大小内存需要，那么batchNum就会不断增长，直到上线
     //3.size越大，一次向central cache要的batchNum就越小
     //4.如果size越小，一次向central cache要的batchNum就越大
@@ -755,7 +785,7 @@ void*ThreadCache::FetchFromCentralCache(size_t index,size_t size)
    }
     else
     {
-        _freeLists[index].PushRange(Nextobj(start),end);
+        _freeLists[index].PushRange(*(void**)start,end);
         return start;
     }
 }
@@ -856,7 +886,7 @@ Central Cache设置为单例模式
 class CentralCache
 {
     private:
-    SpanList _spanList[NFREELIST];
+    SpanList _spanLists[NFREELIST];
     std::muext _mtx;//桶锁
     static CentralCache _sInst;
     
@@ -889,20 +919,24 @@ class CentralCache
 
 ###### CentralCache.cpp
 
-```Cpp
+```cpp
 #include"CentralCache.h"·
+#include"PageCache.h"
 CentralCache CentralCache::_sInst=nullptr;
 
  size_t CentralCache::FetchRangeObj(void*&start,void*&end,size_t n,size_t size)
  {
      size_t index=SizeClass::Index(size);
      _spanLists[index]._mtx.lock();
-     
-     //从span中获取num个对象
-     //如果不够，有多少拿多少
+  
+     //获取一个非空的span
      Span*span=GetOneSpan(_spanLists[index],size);
      assert(span);
      assert(span->_freeList);
+     
+        
+     //从span中获取num个对象
+     //如果不够，有多少拿多少
      start=span->_freeList;
      end=start;
    	 size_t i=0;
@@ -920,14 +954,68 @@ CentralCache CentralCache::_sInst=nullptr;
  }
 
 
-   //从SpanList或者page cache获取一个span 
-Span* CentralCache::GetOneSpan(SpanList&list,size_t byte_size)
+ //从SpanList或者page cache获取一个span 
+Span* CentralCache::GetOneSpan(SpanList&list,size_t size)
 {
+    //先查看当前的spanlist中是否还有非空的为分配对象的span
+ 	Span*it=list.begin();
+    while(it!=list.end())
+    {
+        if(it->_freeList!=nullptr)
+        {
+            return it;
+        }
+        else
+        {
+         	it=it->_next;   
+        }
+    }
+    
+    //说明没有空闲的span了，只能找page cache要
+    Span*span=PageCache::GetInstance()->newSpan(SizeClass::NumMovePage(size));
+    
+    //计算span的大块内存的其实地址和大块内存的大小(字节数)
+    void*start=(void*)span->_pageId<<PAGE_SHIFT;
+    size_t bytes=span->_n<<PAGE_SHIFT;
+    void*end=start+bytes;
+    //把大块内存切成自由链表连接起来
+    //1.先切一块下来做头，方便尾插
+    
+    span->_freeList=start;
+    start+=size;
+    void*tail=span->_freeList;
+    while(start<end)
+    {
+        *(void**)tail=start;
+        tail=*(void**)tail;//tail=stat;
+        start+=size;
+    }
+    list.PushFront(span);
+    
+    return span;
+    
+    
     
 }
 ```
 
+
+
 PageCache整体设计以及实现
+
+申请内存：
+
+1.当central cache向page  cache申请内存时，page cache先检查对应位置有没有span，如果没有则向更大页寻找一个span，如果找到则分裂成两个，比如：申请的是4页page，4页page后面没有挂span，则向后面寻找更大的page，假设在10页page位置找到一个span，则将10页page span 分裂为一个4页的page span和一个6页的page span;
+
+2.如果找到_spanList[128]都灭有找到合适的span，则向系统使用mmap、brk或者是VirtualAlloc等方式申请128页page span挂在自由链表中，再重复1中的过程
+
+3.需要注意的是central cache和page cache的核心结构都是spanlist的哈希桶，但是他们是有本质区别的，central cache中的哈希桶，是按跟thread cache一样的大小对齐关系映射的，它的spanlist中挂的span中的内存都被按映射关系切好链接称小块内存的自由链表，而page cache中的spanlist则是按下标同好映射的，也就是说第i号桶中挂的span都是i页内存
+
+释放内存：
+
+1.如果central cache释放回一个span，则一次寻找span前后page id的没有在使用的空闲span,看是否可以合并，如果合并继续向前寻找，这样就可以将切小的内存合并收缩成大的span，减少内存碎片
+
+如果central cache中的span usecount等于0，说明切分给thread cache小块内存都还回来了，则central cache把这个span还给page cache ，page cache通过页号，查看前后相邻页是否有空闲，是的话就合并，合并出更大的页，解决内存碎片问题
 
 ###### PageCache.h
 
@@ -946,10 +1034,12 @@ class PageCache
     
     public:
     static PageCache*GetInstance()
-    {da
-        return *sInst;
+    {
+        return &sInst;
     }
     
+    
+    //获取一个k页的span
     Span*NewSpan(size_t K)
     {
         
@@ -962,5 +1052,12 @@ class PageCache
 ```cpp
 #include "PageCache.h"
 static PageCache::_sInst;
+```
+
+通过页号计算页的起始地址
+
+```
+页号<<PAGE_SHITF
+页号*8*1024
 ```
 

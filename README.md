@@ -707,6 +707,13 @@ calss SpanList
         Insert(begin(),Span);
     }
     
+    
+    Span*PosFront()
+    {
+        Span*front=_head->_next;
+        Erase(front);
+        return front;
+    }
 };
 ```
 
@@ -975,7 +982,7 @@ Span* CentralCache::GetOneSpan(SpanList&list,size_t size)
     Span*span=PageCache::GetInstance()->newSpan(SizeClass::NumMovePage(size));
     
     //计算span的大块内存的其实地址和大块内存的大小(字节数)
-    void*start=(void*)span->_pageId<<PAGE_SHIFT;
+    char*start=(void*)span->_pageId<<PAGE_SHIFT;
     size_t bytes=span->_n<<PAGE_SHIFT;
     void*end=start+bytes;
     //把大块内存切成自由链表连接起来
@@ -993,9 +1000,6 @@ Span* CentralCache::GetOneSpan(SpanList&list,size_t size)
     list.PushFront(span);
     
     return span;
-    
-    
-    
 }
 ```
 
@@ -1025,7 +1029,7 @@ class PageCache
 {
     private:
     
-    SpanList _spanLists[NPAGES];
+    SpanList _spanLists[NPAGES];//NPAGES=129
     std::mutex _pageMtx;
     static PageCache _sInstan;
  
@@ -1040,10 +1044,7 @@ class PageCache
     
     
     //获取一个k页的span
-    Span*NewSpan(size_t K)
-    {
-        
-    }
+    Span*NewSpan(size_t K);
 }
 ```
 
@@ -1052,6 +1053,32 @@ class PageCache
 ```cpp
 #include "PageCache.h"
 static PageCache::_sInst;
+
+//获取一个k页的span
+Span*PageCache::NewSpan(size_t k)
+{
+    assert(k>0&&k<NPAGES);
+    //先检查第k个桶里面是否有span
+    if(!_spanList[k].empty())
+    {
+        return _spanLists[k]->PopFront();
+    }
+    
+    //检查一下后面的桶里面有没有span，如果有，可以把它进行切分
+    for(size_t i=k+1;i<NPAGES;i++)
+    {
+        if(_spanLists[i].empty())
+        {
+            Span*nSpan=SpanList[i];
+            Span*kSpan=new Span;
+            
+            //在nspan的头部切一个k页下来
+            kSPan->_pageId=nSpan->_pageId;
+            kSpan->_pageId+=k;
+            nSpan->_n-=k;
+        }
+    }
+}
 ```
 
 通过页号计算页的起始地址
@@ -1061,3 +1088,4 @@ static PageCache::_sInst;
 页号*8*1024
 ```
 
+切分成一个k页的span和一个n-k页的span，k页的span返回给central cache

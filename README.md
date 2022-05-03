@@ -784,7 +784,7 @@ void*ThreadCache::FetchFromCentralCache(size_t index,size_t size)
         void*start=nullptr;
     void*end=nullptr;
   size_t actualNum=CentralCache::GetInstance()->FetchRangeObj(start,end,batNum,size);
-    assert(actualNum>1);
+    assert(actualNum>=1);
    if(actualNum==1)
    {
        assert(start==end);
@@ -894,7 +894,7 @@ class CentralCache
 {
     private:
     SpanList _spanLists[NFREELIST];
-    std::muext _mtx;//桶锁
+    std::mutex _mtx;//桶锁
     static CentralCache _sInst;
     
     
@@ -948,7 +948,7 @@ CentralCache CentralCache::_sInst=nullptr;
      end=start;
    	 size_t i=0;
      size_t actualNUm=1;
-     while(i<batchNum-1&&*(void**)!=nullptr)
+     while(i<batchNum-1&&*(void**)end!=nullptr)
      {
          end=*(void**)end;
          i++;

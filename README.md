@@ -458,6 +458,15 @@ static const size_t MAX_BYTES=256*1024;
 static const size_t NFREE_LITS=208;
 static const size_t NPAGES=128;
 static const size_t PAGE_SHIFT=13;
+
+#ifdef _WIN64
+	#include<windows.h>
+#else
+	//...
+#endif
+
+
+
 ifdef _WIN64
     typedef unsigned long long PAGE_ID;
 elif _WIN32
@@ -978,8 +987,18 @@ Span* CentralCache::GetOneSpan(SpanList&list,size_t size)
         }
     }
     
+    
+    //先把central cache的桶锁解掉，这样如果其它线程释放内存对象回来，不会阻塞
+    list._mtx.unlock();
     //说明没有空闲的span了，只能找page cache要
+    
+    PageCache::GetInstance)
+->_pageMtx.lock();
     Span*span=PageCache::GetInstance()->newSpan(SizeClass::NumMovePage(size));
+    //对获取的Span进行切分，不需要加锁，因为其它线程这会拿不到这个span
+    PageCache::GetInstance)
+->_pageMtx.unlock();
+    
     
     //计算span的大块内存的其实地址和大块内存的大小(字节数)
     char*start=(void*)span->_pageId<<PAGE_SHIFT;
@@ -987,6 +1006,7 @@ Span* CentralCache::GetOneSpan(SpanList&list,size_t size)
     void*end=start+bytes;
     //把大块内存切成自由链表连接起来
     //1.先切一块下来做头，方便尾插
+    
     
     span->_freeList=start;
     start+=size;
@@ -997,6 +1017,9 @@ Span* CentralCache::GetOneSpan(SpanList&list,size_t size)
         tail=*(void**)tail;//tail=stat;
         start+=size;
     }
+    //这里要切好span以后需要把span挂到桶里面去的时候，再加锁
+    list._mtx.lock();
+    
     list.PushFront(span);
     
     return span;
@@ -1058,6 +1081,7 @@ static PageCache::_sInst;
 Span*PageCache::NewSpan(size_t k)
 {
     assert(k>0&&k<NPAGES);
+    
     //先检查第k个桶里面是否有span
     if(!_spanList[k].empty())
     {
@@ -1067,17 +1091,33 @@ Span*PageCache::NewSpan(size_t k)
     //检查一下后面的桶里面有没有span，如果有，可以把它进行切分
     for(size_t i=k+1;i<NPAGES;i++)
     {
-        if(_spanLists[i].empty())
+        if(!_spanLists[i].empty())
         {
-            Span*nSpan=SpanList[i];
+            Span*nSpan=_spanList[i].PopFront();
             Span*kSpan=new Span;
             
             //在nspan的头部切一个k页下来
+            //k页的span返回
+            //nSpan再挂到对应的位置
             kSPan->_pageId=nSpan->_pageId;
+            kSpan->_n=k;
             kSpan->_pageId+=k;
             nSpan->_n-=k;
+            
+            _spanLists[nSpan->_n].PushFront(nSpan);
+            return kSpan;
         }
     }
+    
+    //走到这个位置说明后面没有大页的span,
+    //这时候就去找对要一个128页的span
+    Span*bigSpan=new Span;
+    void*ptr=SystemAlloc(NPAGES-1);
+    bigSpan._pageId=(PAGE_ID)ptr>>PAGE_SHIFT;
+    bigSpan->_n=NPAGES-1;
+    
+    _spanLists[bigSpan->_n].PushFront(bigSpan);
+    return NewSpan(k);
 }
 ```
 
@@ -1089,3 +1129,6 @@ Span*PageCache::NewSpan(size_t k)
 ```
 
 切分成一个k页的span和一个n-k页的span，k页的span返回给central cache
+
+
+

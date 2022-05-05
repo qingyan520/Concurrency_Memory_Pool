@@ -490,13 +490,30 @@ class FreeList
         //头插
         *(void**)obj=_freeList;
         _freeList=obj;
+        ++size;
     }
     
     
-    void PushRange(void*start,void*end)
+    void PushRange(void*start,void*end,size_t n)
     {
         *(void**)end=_freeList;
         _freeList=start;
+       _size+=n;
+    }
+    
+    
+    void PopRange(void*&start,void*&end,size_t n)
+    {
+        assert(n>=_size);
+        start=_freeList;
+        end=start;
+        for(size_t i=0;i<n-1;i++)
+        {
+            end=*(void**)end;
+        }
+        _freeList=*(void**)end;
+        *(void**)end=nullptr;
+        _size=n;
     }
     
     //弹出一个对象
@@ -507,6 +524,7 @@ class FreeList
         void*next=*(void**)_freeList;
         
         _freeList=next;
+        --size;
     }
     
     bool Empty()
@@ -517,9 +535,15 @@ class FreeList
     {
         return _maxSize;
     }
+    
+    size_t size()
+    {
+        return size;
+    }
     private:
     void*_freeList=nullptr;
     size_t _maxSize=1;
+    size_t size;
 };
 
 
@@ -739,6 +763,8 @@ class ThreadCache{
     void Deallocate(void*ptr,size_t size);//释放空间
     void*FetchFromCentralCache(size_t index,size_t size);//从中心缓冲获取对象
     
+    //释放对象时，链表过长，回收内存到中心缓存
+    void ListTooLong(FreeList&list,size_t size);
     private:
     FreeList _freeLists[NFREE_LISTS];
 };
@@ -774,6 +800,11 @@ void ThreadCache::Deallocate(void*ptr,size_t size)
     size_t index=SizeClass::Index(size);
     
     _freeLists[index].Push(ptr);
+    
+   //当链表长度大于一次申请的内存时就开始还一段内存给list给central cache if(_freeLists[index].Size()>=_freeLists[index].MaxSize())
+    {
+        ListTooLong(_freeLists[index],size);
+    }
 }
 
 void*ThreadCache::FetchFromCentralCache(size_t index,size_t size)
@@ -804,6 +835,18 @@ void*ThreadCache::FetchFromCentralCache(size_t index,size_t size)
         _freeLists[index].PushRange(*(void**)start,end);
         return start;
     }
+}
+
+
+ //释放对象时，链表过长，回收内存到中心缓存
+void ListTooLong(FreeList&list,size_t size)
+{
+    void*start=nullptr;
+    void*end=nullptr;
+    list.PopRange(start,end,list.MaxSize());
+    
+    CentralCache::aGetINstance()->ReleaseListToSpans(start,size);
+    
 }
 ```
 
@@ -927,6 +970,9 @@ class CentralCache
     //从SpanList或者page cache获取一个span
     Span*GetOneSpan(SpanList&list,size_t byte_size);
     
+    //将一定数量的对象释放到span跨度
+    void ReleaseListToSPans(void*start,size_t byte_size);
+    
     public:
       std::muext _mtx;//桶锁
     
@@ -1023,6 +1069,14 @@ Span* CentralCache::GetOneSpan(SpanList&list,size_t size)
     list.PushFront(span);
     
     return span;
+}
+
+
+void CentralCache::ReleaseListToSpans(void*start,size_t size)
+{
+    size_t index=SizeClass::Index(size);
+    _spanLists[index]._mtx.lock();
+    
 }
 ```
 
@@ -1131,4 +1185,8 @@ Span*PageCache::NewSpan(size_t k)
 切分成一个k页的span和一个n-k页的span，k页的span返回给central cache
 
 
+
+内存回收机制
+
+threadCache内存回收
 
